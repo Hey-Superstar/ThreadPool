@@ -25,7 +25,7 @@ void ThreadPool::set_mode(PoolMode mode) {
 }
 
 //给线程池提交任务（生产任务）
-void ThreadPool::submit_task(std::shared_ptr<Task> sp) {
+Result ThreadPool::submit_task(std::shared_ptr<Task> sp) {
 
 	//获取锁
 	std::unique_lock<std::mutex> lock(task_que_mtx);
@@ -35,7 +35,7 @@ void ThreadPool::submit_task(std::shared_ptr<Task> sp) {
 	if (!not_full.wait_for(lock, std::chrono::seconds(1),
 		[&]()->bool {return taskque_.size() < (size_t)taskque_threshhold; })) {
 		std::cerr << "taskque is full,submit task fail." << std::endl;
-		return;
+		return Result(sp,false);
 	}
 
 	//有空余放入
@@ -44,6 +44,8 @@ void ThreadPool::submit_task(std::shared_ptr<Task> sp) {
 
 	//放了任务后 任务队列不空，not_empty通知消费者thread_func
 	not_empty.notify_all();
+
+	return Result(sp);
 }
 
 void ThreadPool::start(size_t init_threadsize) {
@@ -61,6 +63,17 @@ void ThreadPool::start(size_t init_threadsize) {
 	for (int i = 0; i < init_thread_size; i++) {
 		threads_[i]->start();
 	}
+}
+
+Task::Task() : result_(nullptr){}
+
+void Task::exec() {
+	if(result_!=nullptr)
+		result_->set_val(run());
+}
+
+void Task::set_result(Result* res) {
+	result_ = res;
 }
 
 //线程函数：线程池的所有线程从任务队列里面（消费任务）
@@ -89,7 +102,8 @@ void ThreadPool::thread_func() {
 			not_full.notify_all();
 		}
 		if (task != nullptr) {
-			task->run();
+			//task->run();
+			task->exec();
 		}
 	}
 }
@@ -106,4 +120,25 @@ Thread::~Thread() {
 void Thread::start() {
 	std::thread t(func_); //线程对象t,线程函数func
 	t.detach();
+}
+
+Result::Result(std::shared_ptr<Task> task, bool isvalid)
+	:is_valid(isvalid)
+	, task_(task)
+{
+	task_->set_result(this);
+}
+
+Any Result::get() {
+	if (!is_valid) {
+		return "";
+	}
+
+	sem_.wait();
+	return std::move(any_);
+}
+
+void Result::set_val(Any any) {
+	this->any_ = std::move(any);
+	sem_.post();
 }
