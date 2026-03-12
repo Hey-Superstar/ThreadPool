@@ -22,6 +22,9 @@ public:
 int main() {
 
 	ThreadPool pool;
+
+	pool.set_mode(PoolMode::MODE_CACHED);
+
 	pool.start(4);
 
 	Result res = pool.submit_task(std::make_shared<MyTask>());

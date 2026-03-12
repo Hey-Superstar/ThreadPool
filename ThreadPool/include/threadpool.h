@@ -151,6 +151,7 @@ public:
 private:
 	void thread_func();
 
+	bool check_pool_running_state() const;
 private:
 	std::vector<std::unique_ptr<Thread>> threads_;//线程列表
 	size_t init_thread_size;
@@ -165,6 +166,13 @@ private:
 	std::condition_variable not_empty;  //不满
 
 	PoolMode pool_mode; //线程池的工作模式（固定or可增）
+
+	//表示线程池是否已经启动了
+	std::atomic<bool> is_started;
+
+	//空闲线程的数量
+	std::atomic<int> idle_thread_size;
+
 };
 
 #endif // !THREADPOOL_H
