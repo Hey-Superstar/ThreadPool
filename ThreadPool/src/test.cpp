@@ -12,7 +12,7 @@
 class MyTask : public Task {
 public:
 	Any run() override {
-		std::this_thread::sleep_for(std::chrono::seconds(1));
+		std::this_thread::sleep_for(std::chrono::seconds(3));
 		std::cout << "mytid: " << std::this_thread::get_id() << std::endl;
 		int sum = 0;
 		return sum;

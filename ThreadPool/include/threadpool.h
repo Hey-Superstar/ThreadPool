@@ -8,6 +8,7 @@
 #include<mutex>
 #include<condition_variable>
 #include<functional>
+#include<unordered_map>
 
 //线程通信的信号量类
 class Semaphore {
@@ -108,13 +109,16 @@ enum class PoolMode  //强制要求是用PoolMode::
 
 class Thread {	
 public:
-	using ThreadFunc = std::function<void()>;
+	using ThreadFunc = std::function<void(int)>;
 
 	Thread(ThreadFunc func);
 	~Thread();
 	void start();
+	int get_id() const;
 private:
 	ThreadFunc func_;
+	static int generate_id;
+	int thread_id;
 };
 
 /*
@@ -135,7 +139,10 @@ public:
 	ThreadPool();
 	~ThreadPool();
 	
-	void start(size_t init_threadsize = 4);
+	//设置线程池cached模式的线程数量上限
+	void set_thread_max_threshhold(int threshhold);
+
+	void start(int init_threadsize = 4);
 
 	//设置任务队列上限阈值
 	void set_taskque_max_threshhold(int threshhold);
@@ -149,12 +156,18 @@ public:
 	ThreadPool& operator = (const ThreadPool&) = delete;
 
 private:
-	void thread_func();
+	void thread_func(int threadid);
 
+	//检查线程池的运行状态
 	bool check_pool_running_state() const;
 private:
-	std::vector<std::unique_ptr<Thread>> threads_;//线程列表
-	size_t init_thread_size;
+	//std::vector<std::unique_ptr<Thread>> threads_;//线程列表.
+	std::unordered_map<int, std::unique_ptr<Thread>> threads_;//线程id和线程对象的映射关系
+
+	int init_thread_size;
+	int max_thread_size; //线程池中线程数量的上限
+	std::atomic<int> cur_thread_size; //线程池中当前线程总数量
+	std::atomic<int> idle_thread_size;//空闲线程的数量
 
 	std::queue<std::shared_ptr<Task>> taskque_;
 	std::atomic<int> task_size;
@@ -166,13 +179,7 @@ private:
 	std::condition_variable not_empty;  //不满
 
 	PoolMode pool_mode; //线程池的工作模式（固定or可增）
-
-	//表示线程池是否已经启动了
-	std::atomic<bool> is_started;
-
-	//空闲线程的数量
-	std::atomic<int> idle_thread_size;
-
+	std::atomic<bool> is_started;//表示线程池启动状态
 };
 
 #endif // !THREADPOOL_H

@@ -3,16 +3,29 @@
 #include<thread>
 #include<iostream>
 
-const int TASK_MAX_THRESHHOLD = 1024;
+const int TASK_MAX_THRESHHOLD = 4;
+const int THREAD_MAX_THRESHHOLD = 10;
+const int THREAD_IDLE_TIME = 60;
 
 ThreadPool::ThreadPool()
 	: init_thread_size(0)
 	, task_size(0)
+	, idle_thread_size(0)
+	, cur_thread_size(0)
 	, taskque_threshhold(TASK_MAX_THRESHHOLD)
+	, max_thread_size(THREAD_MAX_THRESHHOLD)
 	, pool_mode(PoolMode::MODE_FIXED)
 	, is_started(false)
-	,idle_thread_size(0)
 {}
+
+void ThreadPool::set_thread_max_threshhold(int threshhold) {
+	if (check_pool_running_state()) {
+		return;
+	}
+	if (pool_mode == PoolMode::MODE_CACHED) {
+		max_thread_size = threshhold;
+	}
+}
 
 ThreadPool::~ThreadPool() 
 {}
@@ -57,32 +70,40 @@ Result ThreadPool::submit_task(std::shared_ptr<Task> sp) {
 	//放了任务后 任务队列不空，not_empty通知消费者thread_func
 	not_empty.notify_all();
 
-	//cached模式 任务处理速度快，任务积压多了，线程池可以增加线程数量
+	//根据任务数量和线程数量的关系，决定是否要增加线程数量
+	//cached模式 任务场景：任务处理速度快，任务积压多了，线程池可以增加线程数量
 	if (pool_mode == PoolMode::MODE_CACHED
 		&& task_size > idle_thread_size
-		&& threads_.size() < 2 * init_thread_size
+		&& cur_thread_size < max_thread_size
 		) {
 		//创建新线程
-		std::unique_ptr<Thread> ptr = std::make_unique<Thread>(std::bind(&ThreadPool::thread_func, this));
+		std::unique_ptr<Thread> ptr = std::make_unique<Thread>(std::bind(&ThreadPool::thread_func, this, std::placeholders::_1));
 		//线程对象需要线程函数,要把非静态成员线程函数(thread_func)给他，要bind（非静态成员函数：必须依附于一个具体的对象实例才能调用）
-		threads_.emplace_back(std::move(ptr));
+		int thread_id = ptr->get_id();
+		threads_.emplace(thread_id, std::move(ptr));
+		//启动线程
+		threads_[thread_id]->start();
+		cur_thread_size++;
+		idle_thread_size++;
 	}
 
 	return Result(sp);
 }
 
-void ThreadPool::start(size_t init_threadsize) {
+void ThreadPool::start(int init_threadsize) {
 	
 	is_started = true;
 
 	//初始线程个数
 	init_thread_size = init_threadsize;
+	cur_thread_size = init_thread_size;
 
 	//创建线程对象
 	for (int i = 0; i < init_thread_size; i++) {
-		std::unique_ptr<Thread> ptr = std::make_unique<Thread>(std::bind(&ThreadPool::thread_func, this));
+		std::unique_ptr<Thread> ptr = std::make_unique<Thread>(std::bind(&ThreadPool::thread_func, this,std::placeholders::_1));
 		//线程对象需要线程函数,要把非静态成员线程函数(thread_func)给他，要bind（非静态成员函数：必须依附于一个具体的对象实例才能调用）
-		threads_.emplace_back(std::move(ptr));
+		int thread_id = ptr->get_id();
+		threads_.emplace(thread_id,std::move(ptr));
 	}
 
 	//启动所有线程
@@ -104,20 +125,45 @@ void Task::set_result(Result* res) {
 }
 
 //线程函数：线程池的所有线程从任务队列里面（消费任务）
-void ThreadPool::thread_func() {
-	/*
-	std::cout << "begin thread_func tid is" << std::this_thread::get_id() << std::endl;
-	std::cout << "end thread_func" << std::endl;
-	*/
+void ThreadPool::thread_func(int threadid) {  //线程函数返回，线程也就结束了
 	
+	auto last_thread_exe_time = std::chrono::steady_clock::now();
+
 	for (;;) {
 		std::shared_ptr<Task> task;
 		{	
 			std::unique_lock<std::mutex> lock(task_que_mtx);
-			std::cout << "尝试获取任务" << std::endl;
-			not_empty.wait(lock, [&]()->bool {return taskque_.size() > 0; });
+
+			std::cout << "TryingGet任务" << std::endl;
+
+			//cached模式下，需要线程回收机制，当前线程空闲时间超过一定时间，就销毁线程
+			//当前时间 - 上一次线程执行的时间 > 60s
+
+			if (pool_mode == PoolMode::MODE_CACHED) {
+				//每一秒钟返回一次
+				while (taskque_.size() > 0) {
+					if (std::cv_status::timeout == not_empty.wait_for(lock, std::chrono::seconds(1))){
+						auto now = std::chrono::steady_clock::now();
+						auto dur = std::chrono::duration_cast<std::chrono::seconds>(now - last_thread_exe_time); 
+						if (dur.count() >= THREAD_IDLE_TIME && cur_thread_size > init_thread_size) {
+							//销毁线程
+							threads_.erase(threadid);
+							cur_thread_size--;
+							idle_thread_size--;
+							std::cout << "线程id: " << threadid << "被销毁了" << std::endl;
+							return; 
+						}
+					}
+				}
+			}else {
+				not_empty.wait(lock, [&]()->bool {return taskque_.size() > 0; });
+			}
+
+			
 			idle_thread_size--;
-			std::cout << "获取任务成功" << std::endl;
+
+			std::cout << "Get任务Success" << std::endl;
+
 			task = taskque_.front();
 			taskque_.pop();
 			task_size--;
@@ -134,20 +180,28 @@ void ThreadPool::thread_func() {
 			task->exec();
 		}
 		idle_thread_size++;
+		last_thread_exe_time = std::chrono::steady_clock::now();
 	}
 }
 
 
 Thread::Thread(ThreadFunc func) 
 	:func_(func)
+	, thread_id(++generate_id)
 {}
+
+int Thread::get_id()const {
+	return thread_id;
+}
 
 Thread::~Thread() {
 
 }
 
+int Thread::generate_id = 0;
+
 void Thread::start() {
-	std::thread t(func_); //线程对象t,线程函数func
+	std::thread t(func_,thread_id); //线程对象t,线程函数func
 	t.detach();
 }
 
